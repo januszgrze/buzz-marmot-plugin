@@ -15,9 +15,11 @@ Buzz's relay never sees chat contents.
 
 ```
 plugin/manifest.json   plugin id marmot.chats; one host grant: the "wn" program
-plugin/plugin.js       the whole plugin (plain JS, React via ctx.react, no build step)
-dev/validate.mjs       manifest and module checks that mirror Buzz's installer rules
+plugin/plugin.js       the built plugin (one ES module; generated, committed)
+src/                   the plugin's source, bundled by `npm run build` (esbuild)
+dev/validate.mjs       manifest, bundle and source checks that mirror Buzz's installer rules
 dev/harness.mjs        runs plugin.js headlessly against real wn (jsdom + React)
+dev/harness/           the harness's Buzz stand-in, wn helpers and test groups
 dev/relay-up.sh        starts a local Marmot relay (strfry in Docker) for the harness
 dev/strfry.conf        that relay's config
 ```
@@ -132,7 +134,7 @@ only; the Marmot key doesn't countersign it yet.
 
 **Marmot relay.** All Marmot traffic (relay lists, KeyPackages, invites and
 encrypted group messages) goes to `wss://relay.us.whitenoise.chat`, White
-Noise's public relay (`MARMOT_RELAYS` in `plugin.js`). Your Buzz community relay
+Noise's public relay (`MARMOT_RELAYS` in `src/shared/constants.js`). Your Buzz community relay
 only carries the binding.
 
 **Chats belong to a community.** There is one Marmot account across all your
@@ -167,14 +169,46 @@ lists untagged chats and chats tagged for other communities too.
 
 ## Development
 
-The plugin is a single plain-JS file; edit `plugin/plugin.js` and update the
-installed copy from **Settings → Plugins → Marmot chats → Update** (for a folder
-install), then reload the window.
+The source lives in `src/` as plain-JS ES modules. `npm run build` bundles it
+with esbuild into `plugin/plugin.js`, the one self-contained module (no
+imports, exporting `inject` and `apply`) that Buzz installs. The built file is
+committed so the install link works straight from the repository; edit `src/`,
+never `plugin/plugin.js`. After a build, update the installed copy from
+**Settings → Plugins → Marmot chats → Update** (for a folder install), then
+reload the window.
 
 ```sh
-node dev/validate.mjs                    # manifest and module checks
+npm install                              # esbuild, the only dependency
+npm run build                            # src/ → plugin/plugin.js
+node dev/validate.mjs                    # manifest, bundle and source checks
 ./dev/relay-up.sh && node dev/harness.mjs
 ```
+
+`dev/validate.mjs` also rebuilds `src/` to a temporary file and fails with
+"run npm run build" if `plugin/plugin.js` doesn't match it.
+
+`src/main.js` exports `inject` and an `apply` that builds each feature in turn
+on one shared `env` object (each `create*` function reads what earlier ones
+added and returns its own exports):
+
+| Folder | Contents |
+| --- | --- |
+| `src/shared/` | Constants (`MARMOT_RELAYS`, `PLUGIN_REPO_URL`, homes, kinds), the store, preferences, host hooks, UI primitives and styles |
+| `src/marmot/` | The `wn` process runner, JSON envelopes, per-identity homes, and the session (daemon, account, feeds, chat actions) |
+| `src/community/` | The `buzz-community/v1` tag and the active community |
+| `src/binding/` | Publishing and looking up kind 30315 Marmot ID bindings |
+| `src/people/` | npub/hex parsing, resolving people to Marmot accounts, names and avatars |
+| `src/sidebar/` | The Encrypted messages section, its row icon and "…" menu |
+| `src/new-chat/` | The New chat view and its To field |
+| `src/conversation/` | Timeline, header (with the ⓘ popover) and conversation view |
+| `src/page/` | The Encrypted chats page and its registration |
+| `src/settings/` | The Marmot ID settings card |
+
+`dev/harness.mjs` runs the test groups in `dev/harness/`: `buzz.mjs` (the Buzz
+host stand-in that loads the bundle), `wn.mjs` (wn processes and CLI accounts),
+`relay.mjs` (the in-memory Buzz relay), `assert.mjs` (waiting and DOM helpers),
+and `sidebar.mjs`, `new-chat.mjs`, `unread.mjs`, `community.mjs` and
+`conversation.mjs`.
 
 The harness runs the real `plugin.js` with React 19 and jsdom taken from a
 [buzz-app](https://github.com/block/buzz) checkout with its `node_modules`
@@ -205,7 +239,7 @@ WN_SECRET_STORE=file wn --home . --json messages send --group <group_id> "hello"
 ## Contributing
 
 Issues and pull requests are welcome. Please keep to stock Buzz plugin APIs (no
-Buzz changes), keep `plugin.js` a single self-contained module, and run
+Buzz changes), edit `src/` and commit the rebuilt `plugin/plugin.js`, and run
 `node dev/validate.mjs` and the harness before opening a pull request.
 
 ## Third-party software

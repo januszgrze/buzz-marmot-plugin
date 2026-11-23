@@ -1,7 +1,10 @@
 // Checks plugin/ against the rules Buzz's installer enforces
 // (buzz-app crates/plugin-manager/src/lib.rs `Manifest::validate`) and the
-// authoring guide's module contract, without building buzzodz.
-import { readFileSync, statSync } from "node:fs";
+// authoring guide's module contract, without building buzzodz, plus the
+// plugin's own rules in src/ and that plugin.js is built from the current src/.
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const dir = fileURLToPath(new URL("../plugin/", import.meta.url));
@@ -40,23 +43,46 @@ for (const process of host.processes ?? []) {
 }
 check((host.processes ?? []).length <= 16, "too many processes");
 
-const code = readFileSync(`${dir}plugin.js`, "utf8");
+// The bundle Buzz loads: one self-contained ES module exporting inject and apply.
+const bundle = readFileSync(`${dir}plugin.js`, "utf8");
 check(statSync(`${dir}plugin.js`).size < 8 * 1024 * 1024, "plugin.js exceeds 8 MiB");
-check(!/^\s*import\s/m.test(code) && !/\bimport\s*\(/.test(code), "plugin.js must not import anything");
-check(/export const inject\s*=/.test(code) && /export function apply\s*\(/.test(code), "plugin.js must export inject and apply");
+check(!/^\s*import\s/m.test(bundle) && !/\bimport\s*\(/.test(bundle), "plugin.js must not import anything");
+const loaded = await import(`data:text/javascript;base64,${Buffer.from(bundle).toString("base64")}`).catch((error) => ({ error }));
+check(Array.isArray(loaded.inject) && typeof loaded.apply === "function", `plugin.js must export inject and apply${loaded.error ? `: ${loaded.error.message}` : ""}`);
+check(!/127\.0\.0\.1|localhost|WN_ALLOW_LOOPBACK_RELAYS/.test(bundle), "plugin.js must not refer to loopback relays (the harness patches them in)");
+try {
+  const { buildPlugin } = await import("../scripts/build.mjs");
+  const temp = mkdtempSync(join(tmpdir(), "marmot-build-"));
+  try {
+    await buildPlugin(join(temp, "plugin.js"));
+    check(readFileSync(join(temp, "plugin.js"), "utf8") === bundle, "plugin/plugin.js is out of date with src/: run npm run build");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+} catch (error) {
+  check(false, `could not rebuild src/ to compare (run npm install): ${error.message}`);
+}
+
+// The source, where the plugin's rules are written down.
+const srcDir = fileURLToPath(new URL("../src/", import.meta.url));
+const code = readdirSync(srcDir, { recursive: true })
+  .filter((file) => file.endsWith(".js"))
+  .sort()
+  .map((file) => readFileSync(join(srcDir, file), "utf8"))
+  .join("\n");
 for (const optional of ["sidebarSections", "ui", "subjectLift", "pluginInstaller", "seen"])
-  check(!new RegExp(`inject = \\[[^\\]]*"${optional}"`).test(code), `${optional} is optional: read it with ctx.reflect.get`);
+  check(!loaded.inject?.includes(optional), `${optional} is optional: read it with ctx.reflect.get`);
 const textSizes = code.match(/fontSize:\s*"[^"]+"/g) ?? [];
 const zoomSafe = (s) => /(rem|var\(--text-[a-z0-9-]+\))"$/.test(s);
 check(textSizes.every(zoomSafe), `non-rem font sizes: ${textSizes.filter((s) => !zoomSafe(s))}`);
-const repoUrls = [...code.matchAll(/const PLUGIN_REPO_URL = "([^"]*)"/g)];
+const repoUrls = [...code.matchAll(/export const PLUGIN_REPO_URL = "([^"]*)"/g)];
 check(repoUrls.length === 1 && /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+$/.test(repoUrls[0][1]), "PLUGIN_REPO_URL must be one https://github.com/<owner>/<repo> constant");
-const relays = code.match(/const MARMOT_RELAYS = Object\.freeze\(\[([^\]]*)\]\);/)?.[1].match(/"[^"]*"/g) ?? [];
+const relays = code.match(/export const MARMOT_RELAYS = Object\.freeze\(\[([^\]]*)\]\);/)?.[1].match(/"[^"]*"/g) ?? [];
 check(relays.length > 0 && relays.every((url) => /^"wss:\/\/[^"/]+\/?"$/.test(url)), "MARMOT_RELAYS must list public wss:// relays");
-check(!/127\.0\.0\.1|localhost|WN_ALLOW_LOOPBACK_RELAYS/.test(code), "plugin.js must not refer to loopback relays (the harness patches them in)");
+check(!/127\.0\.0\.1|localhost|WN_ALLOW_LOOPBACK_RELAYS/.test(code), "src/ must not refer to loopback relays (the harness patches them in)");
 check(/WN_SECRET_STORE: "keychain"/.test(code), "account keys belong in the Keychain (WN_SECRET_STORE: \"keychain\")");
-const communityTag = code.match(/const COMMUNITY_TAG = "([^"]+)";/)?.[1];
-const communityLine = code.match(/const COMMUNITY_LINE = \/(.+)\/m;/)?.[1];
+const communityTag = code.match(/export const COMMUNITY_TAG = "([^"]+)";/)?.[1];
+const communityLine = code.match(/export const COMMUNITY_LINE = \/(.+)\/m;/)?.[1];
 check(
   communityTag && communityLine && new RegExp(communityLine, "m").exec(`about\n${communityTag} wss://a.example:444`)?.[1] === "wss://a.example:444",
   "COMMUNITY_LINE must read the relay URL from a COMMUNITY_TAG line",
