@@ -1,0 +1,9 @@
+{
+  "id": "marmot.chats",
+  "name": "Marmot chats",
+  "apiVersion": 1,
+  "description": "End-to-end encrypted Marmot (MLS over Nostr) group chats, run through MDK's wn CLI and its wnd daemon.",
+  "host": {
+    "processes": [{ "id": "wn", "program": "wn" }]
+  }
+}
